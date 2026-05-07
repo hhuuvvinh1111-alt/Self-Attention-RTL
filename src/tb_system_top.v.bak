@@ -1,0 +1,155 @@
+`timescale 1ns / 1ps
+
+module tb_system_top();
+
+    // ==========================================
+    // 1. KHAI BÁO TÍN HIỆU
+    // ==========================================
+    reg  clk;
+    reg  rst_n;
+    reg  uart_rx_pin;
+    
+    wire uart_tx_pin;
+    wire [3:0] led;
+
+    // ==========================================
+    // 2. GỌI MODULE SYSTEM TOP (UUT)
+    // ==========================================
+    system_top uut (
+        .clk(clk),
+        .rst_n(rst_n),
+        .uart_rx_pin(uart_rx_pin),
+        .uart_tx_pin(uart_tx_pin),
+        .led(led)
+    );
+
+    // ==========================================
+    // 3. TẠO XUNG CLOCK (50MHz -> Chu kỳ 20ns)
+    // ==========================================
+    initial begin
+        clk = 0;
+        forever #10 clk = ~clk; 
+    end
+
+    // ==========================================
+    // 4. CẤU HÌNH GIAO THỨC UART (LAPTOP MOCK)
+    // ==========================================
+    // NẾU BẠN SỬA BAUD RATE TRONG MODULE, HÃY SỬA Ở ĐÂY CHO KHỚP
+    localparam BAUD_RATE  = 115200; 
+    localparam BIT_PERIOD = 1_000_000_000 / BAUD_RATE; 
+
+    // Hàm giả lập truyền 1 Byte từ Laptop xuống FPGA
+    task send_byte;
+        input [7:0] data;
+        integer i;
+        begin
+            rx_pin_reg = 1'b0; // Start Bit
+            #(BIT_PERIOD);
+            
+            for (i = 0; i < 8; i = i + 1) begin
+                rx_pin_reg = data[i]; // Data Bits
+                #(BIT_PERIOD);
+            end
+            
+            rx_pin_reg = 1'b1; // Stop Bit
+            #(BIT_PERIOD);
+        end
+    endtask
+    
+    // Biến nối dây vật lý cho Task
+    reg rx_pin_reg;
+    always @(*) uart_rx_pin = rx_pin_reg;
+
+    // ==========================================
+    // 5. BỘ LƯU TRỮ MA TRẬN GIẢ LẬP
+    // ==========================================
+    reg [15:0] mem_X  [0:4095];
+    integer word_idx;
+
+    initial begin
+        // Đọc ma trận X từ file Hex (Giống Testbench trước)
+        $readmemh("C:/DA1/GM/input_X_tb.hex", mem_X);
+    end
+
+    // ==========================================
+    // 6. MÁY TRẠNG THÁI NHẬN DỮ LIỆU TỪ FPGA (MONITOR)
+    // ==========================================
+    reg [7:0] recv_byte;
+    integer   recv_count = 0;
+    integer   bit_idx = 0;
+
+    // Khối này luôn lắng nghe chân TX. Khi TX rớt xuống 0 (Start bit), nó sẽ đọc
+    always @(negedge uart_tx_pin) begin
+        if (rst_n) begin
+            #(BIT_PERIOD / 2); // Chờ đến giữa Start Bit
+            if (uart_tx_pin == 1'b0) begin // Xác nhận đúng Start Bit
+                #(BIT_PERIOD); // Nhảy đến Data Bit 0
+                for (bit_idx = 0; bit_idx < 8; bit_idx = bit_idx + 1) begin
+                    recv_byte[bit_idx] = uart_tx_pin;
+                    #(BIT_PERIOD);
+                end
+                
+                // In ra màn hình mỗi khi nhận được 1 byte từ FPGA
+                if (recv_count % 2 == 0)
+                    $display("[%0t ns] [FPGA -> PC] Nhận Byte CAO: 8'h%h", $time, recv_byte);
+                else
+                    $display("[%0t ns] [FPGA -> PC] Nhận Byte THẤP: 8'h%h", $time, recv_byte);
+                
+                recv_count = recv_count + 1;
+            end
+        end
+    end
+
+    // ==========================================
+    // 7. KỊCH BẢN TEST CHÍNH
+    // ==========================================
+    initial begin
+        rst_n = 0;
+        rx_pin_reg = 1;
+        
+        #100; rst_n = 1; #100;
+
+        $display("=================================================");
+        $display("🚀 BẮT ĐẦU MÔ PHỎNG HỆ THỐNG FULL SOC");
+        $display("=================================================");
+        
+        // --- BƯỚC 1: TRUYỀN MA TRẬN X ---
+        $display(">>> Đang truyền Ma trận X (4096 Words) ...");
+        for (word_idx = 0; word_idx < 4096; word_idx = word_idx + 1) begin
+            send_byte(mem_X[word_idx][15:8]); // High Byte
+            send_byte(mem_X[word_idx][7:0]);  // Low Byte
+        end
+        
+        // --- BƯỚC 2: TRUYỀN TRỌNG SỐ Wq (Dùng Hằng số 0x0020 = 0.125) ---
+        $display(">>> Đang truyền Ma trận Wq (Hằng số 0x0020) ...");
+        for (word_idx = 0; word_idx < 4096; word_idx = word_idx + 1) begin
+            send_byte(8'h00); send_byte(8'h20);
+        end
+
+        // --- BƯỚC 3: TRUYỀN TRỌNG SỐ Wk (Dùng Hằng số 0x0020 = 0.125) ---
+        $display(">>> Đang truyền Ma trận Wk (Hằng số 0x0020) ...");
+        for (word_idx = 0; word_idx < 4096; word_idx = word_idx + 1) begin
+            send_byte(8'h00); send_byte(8'h20);
+        end
+
+        // --- BƯỚC 4: TRUYỀN TRỌNG SỐ Wv (Dùng Hằng số 0xFF82 giống lần trước bạn test) ---
+        $display(">>> Đang truyền Ma trận Wv (Hằng số 0xFF82) ...");
+        for (word_idx = 0; word_idx < 4096; word_idx = word_idx + 1) begin
+            send_byte(8'hFF); send_byte(8'h82);
+        end
+
+        $display("=================================================");
+        $display("✅ PC GỬI XONG TOÀN BỘ DATA. ĐỢI LÕI AI CHẠY...");
+        $display("=================================================");
+        
+        // Đợi Lõi AI tính toán xong và đợi FPGA bắn trả toàn bộ 8192 bytes Z
+        // Cảnh báo: Lệnh wait này có thể mất hàng chục giây mô phỏng ngoài đời thực
+        wait (recv_count == 8192);
+        
+        $display("=================================================");
+        $display("🎉 MÔ PHỎNG HOÀN TẤT THÀNH CÔNG THUẬN LỢI!");
+        $display("=================================================");
+        $stop;
+    end
+
+endmodule
